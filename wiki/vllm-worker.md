@@ -2,111 +2,161 @@
 
 ## Overview
 
-`vllm_worker.py` implements an LLM worker that integrates vLLM v1's continuous batching scheduler with SimPy discrete event simulation. This module combines scheduler data structures and worker execution logic in a single cohesive implementation that accurately models real vLLM behavior.
+`vllm_worker.py` implements an LLM worker that integrates vLLM v1's continuous batching scheduler with SimPy discrete event simulation. The module uses an **interrupt-driven architecture** (no polling) with a **persistent batch model** that accurately simulates real vLLM behavior including preemption, KV cache fetch rate-limiting, and tensor parallelism.
 
 ## Key Features
 
-### 1. **vLLM-Style Continuous Batching**
+### 1. **Interrupt-Driven Scheduling (No Polling)**
+- Two cooperating coroutines: intake loop and scheduler loop
+- Both sleep indefinitely when idle, waking only on interrupts
+- Eliminates wasteful polling with small timeouts
+- Atomic scheduler steps prevent mid-execution corruption
+
+### 2. **vLLM-Style Continuous Batching**
 - FIFO scheduling for both prefill and decode phases
 - Dynamic batch formation based on resource constraints
 - Support for mixed prefill and decode in the same batch
+- Persistent batch model: batch rebuilt only when requests complete
 
-### 2. **GPU Memory Block Management**
+### 3. **GPU Memory Block Management**
 - Configurable block size (default 16 tokens)
+- Tensor parallelism support (KV cache distributed across TP ranks)
 - Tracks allocated blocks per request throughout lifecycle
 - Proper block allocation/deallocation at request start/completion
 - Enforces memory constraints during batch construction
 
-### 3. **KV Cache Integration**
-- Prefix matching via `OpalKVCacheEngine.lookup()`
+### 4. **KV Cache Integration with Rate-Limiting**
+- Prefix matching via `OpalKVCacheEngine.lookup()` (results cached per request)
 - Asynchronous KV cache fetching simulation
+- Rate-limiting via `max_kvc_ready_requests` to prevent GPU memory hogging
 - Proper state transitions for cache operations (WAITING → FETCH_KVC → READY)
 
-### 4. **Chunked Prefill Support**
+### 5. **Chunked Prefill Support**
 - Large prompts processed in configurable chunks
 - Prevents memory overflow and improves latency
 - Chunk size derived from `max_num_batched_tokens`
 
-### 5. **Realistic Timing Model**
-- Per-batch timing: `max(longest_prefill_chunk, longest_decode)`
-- GPU model integration for accurate latency calculations
-- Accounts for prefix matching in prefill time
+### 6. **Request Preemption**
+- Least-work-done eviction strategy when GPU memory is exhausted
+- Maximum 3 preemptions per request before skipping
+- Preempted requests reset to WAITING and re-enter queue at front
+- Requests near completion (within 5% of decode) are protected
 
-### 6. **Full Request Lifecycle Tracking**
+### 7. **Realistic Timing Model**
+- Per-batch timing: `max(longest_prefill_chunk, batched_decode_latency)`
+- GPU model integration for accurate latency calculations
+- Accounts for prefix matching (already-processed tokens) in prefill time
+- Batched decode latency calculation
+
+### 8. **Full Request Lifecycle Tracking**
 - Complete state machine using single `RequestPhase` enum
-- Detailed statistics collection
-- Per-token timestamp tracking
+- Detailed statistics collection with per-step timestamps
+- KVC prefix hit tracking
 
 ## Architecture
+
+### Interrupt-Driven Design
+
+```
+queue_work() [router calls this]
+    │
+    ├─ Put request in _worker_local_queue
+    └─ Interrupt _check_new_requests (if idle)
+              │
+              ├─ Get request from queue
+              ├─ Add to waiting_requests
+              └─ Interrupt _vllm_scheduling_loop (if idle)
+                        │
+                        └─ _scheduler_step() [atomic, never interrupted mid-work]
+```
+
+Two flags control interrupt delivery:
+- `_check_new_requests_idle`: True only during intake's idle sleep
+- `_scheduler_busy`: False only during scheduler's idle sleep
 
 ### Request State Flow
 
 ```
-New Request
+New Request → queue_work()
     ↓
-WAITING (in worker queue)
+WAITING (in waiting_requests)
     ↓
-KVC Lookup
+KVC Lookup (cached per request)
     ↓
 Has Prefix Match?
-    ├─ Yes → FETCH_KVC (retrieve KV cache)
-    │           ↓
-    │        READY
+    ├─ Yes → Allocate blocks → FETCH_KVC (async retrieve)
+    │                              ↓
+    │                           READY
     └─ No  → READY
                 ↓
-        Scheduled in Batch
+        Added to Batch (moved to running_requests)
                 ↓
-        PREFILL/PREFILL_CHUNKED
+        PREFILL_CHUNKED (process chunks)
                 ↓
         Prefill Complete?
                 ↓
-            DECODE
+            DECODE (1 token per step)
                 ↓
         All Tokens Generated?
                 ↓
-            COMPLETED
+            COMPLETED → KVC store → Release blocks → Output
+```
+
+Preemption can occur at any running phase:
+```
+PREFILL_CHUNKED or DECODE → WAITING (progress reset, front of queue)
 ```
 
 ### Core Components
 
 #### 1. **RequestPhase (Enum)**
 Single source of truth for request states:
-- `WAITING`: Request queued, not yet processed for KVC lookup
-- `FETCH_KVC`: KVC retrieve in progress, moved to back of waiting queue
-- `READY`: KVC complete or no match, ready to be scheduled
-- `PREFILL`: Processing prompt tokens (non-chunked mode)
-- `PREFILL_CHUNKED`: Processing prompt in chunks (chunked mode)
-- `DECODE`: Generating output tokens one by one
-- `COMPLETED`: Request finished
+- `WAITING`: In waiting queue, not yet processed for KVC lookup
+- `FETCH_KVC`: Async KVC data transfer in progress (blocks already committed)
+- `READY`: KVC complete or no prefix match, ready to be scheduled into a batch
+- `PREFILL_CHUNKED`: Processing prompt tokens in chunks
+- `DECODE`: Generating output tokens one per scheduler step
+- `COMPLETED`: Request finished, pending KVC store and memory release
 
 #### 2. **VLLMSchedulerConfig**
 Configuration parameters for scheduler:
 - `max_num_seqs`: Maximum sequences in a batch (default 256)
 - `max_num_batched_tokens`: Maximum tokens per batch (default 2048)
 - `chunked_prefill`: Enable chunked prefill (default True)
-- `max_model_len`: Maximum sequence length
+- `max_model_len`: Maximum sequence length (from model config)
 - `gpu_memory_kvcache_bytes`: Available GPU memory for KV cache
+- `max_kvc_ready_requests`: Max KVC-fetching requests in waiting queue (default 4)
+- `lookahead_reqs`: Max waiting requests to scan when batch is non-empty (default 256)
 
 #### 3. **VLLMSchedulerRequest**
 Extends `SchedulerRequest` to wrap `LLMRequest`:
 - Maintains reference to original request for stats tracking
 - Includes `hash_ids` for KVC lookup
-- Tracks prefix matching results
 - Tracks allocated GPU memory blocks
+- Tracks preemption count (max 3)
+- Caches KVC lookup results to avoid repeated lookups
 
-#### 4. **LLMWorkerVLLMScheduler**
+#### 4. **BatchMetadata**
+Tracks the current persistent batch:
+- `prefill_requests` / `decode_requests`: Requests in each phase
+- `request_tokens`: Maps request_id to tokens scheduled in this step
+- `total_tokens` / `prefill_tokens` / `decode_tokens`: Token accounting
+
+#### 5. **LLMWorkerVLLMScheduler**
 Main worker class with key methods:
 
-- `_vllm_scheduling_loop()`: Continuous scheduling loop
-- `_scheduler_step()`: Execute one scheduling iteration
-- `_check_new_requests()`: Poll for new requests from router
-- `_process_kvc_transitions()`: Handle KVC lookup and fetch
-- `_create_batch()`: Form batch with vLLM logic and block allocation
+- `queue_work()`: Entry point from router, interrupt-driven wake-up
+- `_vllm_scheduling_loop()`: Main loop, sleeps when idle, processes atomically when active
+- `_scheduler_step()`: Execute one iteration (build/run batch, advance states, handle completions)
+- `_check_new_requests()`: Intake loop, sleeps until queue_work() interrupts
+- `_build_batch()`: 4-phase batch construction with preemption
 - `_calculate_batch_time()`: Compute batch execution time
-- `_update_request_states_and_stats()`: Advance states and update metrics
-- `_move_newly_started_requests()`: Move requests from waiting to running queue
-- `_move_completed_requests()`: Move requests from running to completed queue
-- `_handle_completed_requests()`: Store KVC, release blocks, and output results
+- `_update_request_states_and_stats()`: Advance states and move prefill→decode within batch
+- `_move_completed_requests()`: Move completed from running queue and batch
+- `_handle_completed_requests()`: Store KVC, release blocks, output results
+- `_async_kvc_retrieve()`: Async coroutine for KVC data transfer
+- `_preempt_request()`: Evict least-work-done request from batch
+- `_can_issue_kvc_fetch()`: Rate-limit KVC fetching to prevent memory hogging
 
 ## Configuration
 
@@ -118,7 +168,6 @@ Add to your `sim_config/*.json`:
 {
   "worker": {
     "worker_params": {
-      "worker_local_queue_capacity": 100,
       "periodic_infra_update_time": 1.0,
       "kvcevent_coalesce_time": 0.1
     },
@@ -126,7 +175,9 @@ Add to your `sim_config/*.json`:
       "max_num_seqs": 8,
       "max_num_batched_tokens": 2048,
       "chunked_prefill": true,
-      "block_size": 16
+      "block_size": 16,
+      "max_kvc_ready_requests": 4,
+      "lookahead_reqs": 256
     },
     "hw": {
       "gpu": "H100",
@@ -147,90 +198,74 @@ Add to your `sim_config/*.json`:
 | `max_num_batched_tokens` | Max tokens per batch | 2048 | Token throughput & chunk size |
 | `chunked_prefill` | Enable chunked prefill | true | Large prompt handling |
 | `block_size` | Tokens per GPU memory block | 16 | Memory granularity |
-| `memory_gb` | GPU memory in GB | 16 | Total GPU memory |
-| `tp` | Tensor parallelism degree | 1 | Model sharding |
+| `max_kvc_ready_requests` | Max KVC-fetching requests in waiting queue | 4 | KVC fetch rate-limiting |
+| `lookahead_reqs` | Max waiting requests scanned per rebuild | 256 | Batch rebuild scan depth |
+| `memory_gb` | GPU memory in GB | - | Total per-GPU memory |
+| `tp` | Tensor parallelism degree | 1 | Effective memory = tp * memory_gb |
 
-## Usage Example
+### Tensor Parallelism Memory Model
 
-### Basic Usage
+With TP enabled, total effective memory for KV cache is `tp * memory_gb`. The model is loaded once (shared across TP ranks), but KV cache is distributed across all ranks:
 
-```python
-from opal.vllm_worker import LLMWorkerVLLMScheduler
-from opal.environment import OpalSimulatorEnvironment
-from opal.opal_config import OpalConfig
-
-# Load configuration
-config = OpalConfig("path/to/config.json")
-env = OpalSimulatorEnvironment(config)
-
-# Create worker with vLLM scheduler
-worker = LLMWorkerVLLMScheduler(
-    opal_env=env,
-    opal_config=config,
-    output_req_queue=output_queue,
-    infra_update_queue=infra_queue
-)
-
-# Worker automatically starts scheduling loop
-# Requests are processed as they arrive in worker.worker_local_queue
 ```
-
-### Integration with Router
-
-Use `LLMWorkerVLLMScheduler` in your router configuration:
-
-```python
-# In router.py
-from opal.vllm_worker import LLMWorkerVLLMScheduler
-
-worker = LLMWorkerVLLMScheduler(
-    opal_env=env,
-    opal_config=config,
-    output_req_queue=output_queue,
-    infra_update_queue=infra_queue
-)
+total_gpu_memory = memory_gb * tp * 1024^3
+free_for_kvcache = total_gpu_memory - model_size_bytes
+total_gpu_blocks = free_for_kvcache / (block_size * key_value_bytes)
 ```
 
 ## Scheduling Algorithm
 
-### Batch Creation Logic
+### Batch Creation Logic (`_build_batch`)
 
-The scheduler follows continuous batching with FIFO ordering:
+The scheduler builds or rebuilds a batch in 4 phases:
 
-1. **Phase 1: Running Requests (FIFO Order)**
-   - Add all running requests (both prefill and decode)
-   - Decode requests generate 1 token per step
-   - Prefill requests process up to chunk size tokens
-   - Respect token budget and memory block constraints
+1. **Phase 1: Resume Existing Decode Requests (Highest Priority)**
+   - Each decode request generates 1 token per step
+   - Calculate blocks needed for the new token
+   - If constraints violated → mark for preemption
 
-2. **Phase 2: New READY Requests (FIFO Order)**
-   - Add new requests ready for prefill
-   - Start with first chunk
-   - Allocate GPU memory blocks as needed
-   - Stop when constraints are violated
+2. **Phase 2: Resume Existing Prefill Requests**
+   - Calculate chunk size (min of ideal chunk, remaining token budget)
+   - Calculate blocks needed for the chunk
+   - If constraints violated → mark for preemption
+
+3. **Phase 3: Preempt Requests That Cannot Fit**
+   - Free GPU blocks from preempted requests
+   - Reset progress (prompt_processed=0, decode_tokens_generated=0)
+   - Move to front of waiting queue with incremented preemption count
+
+4. **Phase 4: Add New READY Requests from Waiting Queue (with Lookahead Limit)**
+   - Perform KVC lookup for WAITING requests (result cached)
+   - Rate-limit KVC fetches via `max_kvc_ready_requests`
+   - Initiate async KVC retrieve for prefix matches
+   - Add READY requests to batch (allocate blocks, move to running)
+   - Stop on `max_num_seqs`, token budget exhaustion, or memory exhaustion
+   - Apply `lookahead_reqs` limit when batch started non-empty
+
+### Persistent Batch Model
+
+The batch is NOT rebuilt from scratch every step. Instead:
+- The batch persists across steps until a request completes
+- On completion: remove finished request, then rebuild to fill vacated slot
+- This avoids repeated waiting-queue scans per step
 
 ### Resource Constraints
 
 Batch creation respects three constraints:
 
 1. **Max Sequences**: `max_num_seqs` limit
-2. **Max Tokens**: `max_num_batched_tokens` limit
+2. **Max Tokens**: `max_num_batched_tokens` limit (token budget = compute proxy)
 3. **GPU Memory Blocks**: Available free blocks
 
 ### GPU Memory Block Management
 
 ```python
-# Calculate blocks needed for new request
-if request.phase == READY:
-    total_tokens = prefix_match_tokens + tokens_to_add
-    total_blocks = (total_tokens + block_size - 1) // block_size
-    blocks_needed = total_blocks - allocated_blocks
-
-# Calculate blocks needed for running request
-else:
-    current_blocks = (kv_cache_tokens + block_size - 1) // block_size
-    new_blocks = (kv_cache_tokens + tokens_to_add + block_size - 1) // block_size
-    blocks_needed = new_blocks - current_blocks
+# Blocks grow incrementally as request progresses
+current_tokens = prompt_processed + decode_tokens_generated
+new_tokens = current_tokens + tokens_to_add
+current_blocks = ceil(current_tokens / block_size)
+new_blocks = ceil(new_tokens / block_size)
+blocks_needed = new_blocks - current_blocks
 
 # Allocate blocks
 if blocks_needed <= free_gpu_blocks:
@@ -238,57 +273,70 @@ if blocks_needed <= free_gpu_blocks:
     free_gpu_blocks -= blocks_needed
 ```
 
+### KVC Fetch Rate-Limiting
+
+To prevent KVC-fetching requests from hogging GPU memory and causing excessive preemptions of running requests:
+
+```python
+# Only allow N requests to be in FETCH_KVC or READY-with-blocks state
+kvc_ready_count = count(req for req in waiting_requests
+                        if req.phase == FETCH_KVC
+                        or (req.phase == READY and req.allocated_blocks > 0))
+
+if kvc_ready_count >= max_kvc_ready_requests:
+    skip this request  # Leave in WAITING state
+```
+
+### Preemption Strategy
+
+When a running request cannot fit in the batch (memory pressure):
+
+1. Select candidate with **least work done** (lowest work_score)
+2. Skip requests near completion (within 5% of decode tokens)
+3. Skip requests already preempted 3 times
+4. Free all allocated blocks
+5. Reset progress to 0, move to front of waiting queue
+6. Request will go through KVC lookup again on next scheduling
+
 ### Timing Calculation
 
 For each batch:
 
 ```python
-# Calculate prefill times
+# Prefill: account for already-processed tokens as "cached"
 for each prefill_request:
-    if first_chunk:
-        # Can use prefix match benefit
-        effective_prefix = min(prefix_match_tokens, tokens_to_process)
-        prefill_time = gpu_model.get_prefill_latency(
-            tokens_to_process, effective_prefix
-        )
-    else:
-        # Subsequent chunks - no prefix match benefit
-        prefill_time = gpu_model.get_prefill_latency(
-            tokens_to_process, 0
-        )
+    total_context = prompt_processed + tokens_to_process
+    cached_prefix = prompt_processed  # Already in GPU from prior chunks/KVC
+    prefill_time = gpu_model.get_prefill_latency(total_context, cached_prefix)
     max_prefill_time = max(max_prefill_time, prefill_time)
 
-# Calculate decode times
-for each decode_request:
-    current_length = prompt_tokens + decode_tokens_generated
-    decode_time = gpu_model.get_decode_latency(current_length, 1)
-    max_decode_time = max(max_decode_time, decode_time)
+# Decode: batched latency calculation
+decode_batch = [(prompt_tokens + decode_tokens_generated) for each decode_request]
+decode_time = gpu_model.get_decode_latency_batch(decode_batch)
 
 # Batch time (parallel execution)
-batch_time = max(max_prefill_time, max_decode_time)
+batch_time = max(max_prefill_time, decode_time)
 ```
 
 ## Statistics Collected
 
 ### Per-Request Statistics
 
-Tracked in `request.stats`:
+Tracked in `request.llm_request.stats`:
 
-- `creation_time`: Request creation timestamp
-- `arrival_time`: Arrival at worker
-- `start_processing_time`: Start of processing
-- `end_kvc_time`: KVC operations complete
-- `start_gpu_time`: GPU processing starts
-- `completion_time`: Request fully complete
-- `token_timestamps`: List of per-token/chunk times
-- `kvc_prefix_reuse`: Number of prefix-matched tokens
+- `worker_arrival_time`: Arrival at worker
+- `_3_start_processing_time`: Start of KVC lookup processing
+- `_4_request_ready_time`: Request enters READY state
+- `_5_gpu_start_time`: Added to batch, GPU processing starts
+- `_7_decode_done_time`: Request fully complete
+- `scheduler_timestamps`: List of per-step timestamps
+- `prefix_hit_tokens`: Number of prefix-matched tokens
 
 ### Worker-Level Metrics
 
 - `gpu_busy_time`: Total GPU active time
 - Queue lengths: `waiting_requests`, `running_requests`, `completed_requests`
-- Batch statistics: size, tokens, memory usage
-- GPU memory: `total_gpu_blocks`, `free_gpu_blocks`
+- GPU memory: `total_gpu_blocks`, `free_gpu_blocks`, `kvc_fetch_blocks_in_flight`
 
 ## Comparison with worker_single_stage.py
 
@@ -296,28 +344,25 @@ Tracked in `request.stats`:
 |---------|------------------------|----------------|
 | Batching | No batching (1 req at a time) | Continuous batching |
 | Scheduling | Simple FIFO | FIFO with resource constraints |
+| Architecture | Polling | Interrupt-driven (no polling) |
 | Prefill | All-at-once | Chunked support |
-| KVC Lookup | Optional, commented out | Integrated with state machine |
+| KVC Lookup | Optional | Integrated with rate-limiting |
 | Timing | Per-request sequential | Per-batch parallel |
 | State Tracking | Basic | Full vLLM state machine |
-| Memory Management | Simple | GPU block management |
+| Memory Management | Simple | GPU block management with TP |
+| Preemption | None | Least-work-done strategy |
+| Batch Model | N/A | Persistent (rebuild on completion) |
 | Realism | Low | High (matches vLLM v1) |
 
-## Performance Considerations
+## Known Issues
 
-### Advantages
+1. `_periodic_infra_updates` is defined but never started in `_run()` — the router never receives load/utilization updates from this worker.
 
-1. **More Realistic**: Matches actual vLLM v1 behavior
-2. **Better Throughput**: Continuous batching improves GPU utilization
-3. **Chunked Prefill**: Handles large prompts efficiently
-4. **KVC Integration**: Proper prefix matching simulation
-5. **Memory Management**: Realistic GPU memory block tracking
+2. Dead code in `_async_kvc_retrieve`: the assert guarantees `actual_kvc_blocks == estimated_kvc_blocks`, making the subsequent adjustment if-block unreachable.
 
-### Trade-offs
+3. Starvation risk: preempted requests reset to `prompt_processed=0` and re-enter at front of waiting queue, but under sustained memory pressure they can be repeatedly preempted (up to cap of 3) with no further recourse or priority escalation.
 
-1. **Complexity**: More complex than simple sequential processing
-2. **Memory**: Tracks more state per request
-3. **Computation**: Batch formation has overhead
+4. Leaked `request_tokens` entries: Phase 3 preemption removes requests from batch lists but never does `del batch.request_tokens[req.request_id]`.
 
 ## Debugging
 
@@ -331,81 +376,50 @@ logging.basicConfig(level=logging.DEBUG)
 ### Key Log Messages
 
 - `"New request X added to waiting queue (phase: WAITING)"`
-- `"KVC lookup for request X"`
-- `"Request X: prefix match = Y/Z tokens"`
-- `"Scheduler step_N: batch=[...], tokens=T/MAX, free_blocks=F/TOTAL"`
-- `"Added READY request X: tokens=T, blocks_needed=B"`
-- `"Batch execution time: T seconds"`
+- `"Request X: initiating async KVC retrieve for N tokens, allocated B blocks"`
+- `"Fetched KVC tokens N for Request X"`
+- `"Request X: no prefix match, now READY"`
+- `"Added READY request X: tokens=T, blocks_needed=B, free_blocks=F/TOTAL"`
+- `"PREEMPTED request X: freed B blocks (work_score=W, preemption_count=C)"`
 - `"Request X: prefill complete, transitioning to DECODE"`
-- `"Request X: released B blocks after KVC store"`
-- `"Request X completed: prefill=P tokens, decode=D tokens, prefix_match=M tokens"`
+- `"Request X: released B blocks after saving KVC store"`
+- `"Request X retired on worker.W: prefill=P tokens, decode=D tokens"`
+- `"KVC fetch blocked: N KVC-ready requests in waiting queue >= max"`
+- `"Scheduler interrupted during work - unexpected while busy"`
 
-## Testing
+### Invariant Checks
 
-### Unit Tests
-
+Enable detailed memory and batch invariant checking:
 ```python
-# Test batch creation
-def test_batch_creation():
-    # Create worker and requests
-    # Verify batch respects constraints
-    # Check FIFO ordering
-
-# Test KVC integration
-def test_kvc_lookup():
-    # Create request with hash_ids
-    # Verify lookup called correctly
-    # Check state transitions
-
-# Test timing calculation
-def test_batch_timing():
-    # Create batch with mixed requests
-    # Verify timing = max(prefill, decode)
-
-# Test GPU memory blocks
-def test_block_allocation():
-    # Create requests
-    # Verify blocks allocated/deallocated correctly
-    # Check memory constraints enforced
+# In check_invariants(), set:
+enable_variant_checks = True
 ```
 
-### Integration Tests
-
-Run with sample workload:
-
-```bash
-cd opal
-python -m pytest tests/test_worker2_example.py -v
-```
+This verifies:
+- `init_free_blocks == free_gpu_blocks + sum(all allocated blocks)`
+- Batch token budget matches sum of per-request tokens
+- No COMPLETED requests in waiting queue
 
 ## Module Structure
 
 The `vllm_worker.py` module contains:
 
-1. **Scheduler Data Structures** (lines 50-151)
-   - `RequestPhase`: Request state enum
-   - `VLLMSchedulerConfig`: Scheduler configuration
-   - `SchedulerRequest`: Base request class
-   - `BatchMetadata`: Batch information
-   - `VLLMSchedulerRequest`: Extended request with LLM integration
+1. **Scheduler Data Structures** (lines 89-208)
+   - `RequestPhase`: Request state enum (6 states)
+   - `VLLMSchedulerConfig`: Scheduler configuration with validation
+   - `SchedulerRequest`: Base request class with progress tracking
+   - `VLLMSchedulerRequest`: Extended request with LLM integration and preemption tracking
+   - `BatchMetadata`: Batch information with per-request token tracking
 
-2. **Scheduler Helper Functions** (lines 162-178)
-   - `schedule_prefill_chunk()`: Calculate tokens to process
+2. **Scheduler Helper Functions** (lines 215-228)
+   - `schedule_prefill_chunk()`: Calculate tokens to process per chunk
 
-3. **Worker Implementation** (lines 186-744)
+3. **Worker Implementation** (lines 235-1738)
    - `LLMWorkerVLLMScheduler`: Main worker class
-   - All scheduling, batching, and execution logic
-
-## Future Enhancements
-
-Potential improvements:
-
-1. **Preemption**: Support for request preemption
-2. **Priority Scheduling**: Request priority levels
-3. **Speculative Decoding**: Multi-token generation
-4. **Memory Swapping**: CPU offloading simulation
-5. **Multi-GPU**: Tensor parallelism support
-6. **Advanced Scheduling**: More sophisticated policies
+   - Interrupt-driven architecture with two cooperating coroutines
+   - 4-phase batch building with preemption
+   - Async KVC retrieval with rate-limiting
+   - Persistent batch model
 
 ## References
 
@@ -413,19 +427,9 @@ Potential improvements:
 - [Continuous Batching Paper](https://arxiv.org/abs/2309.06180)
 - [LMCache Integration](https://github.com/LMCache/LMCache)
 - `opal/vllm_worker.py`: Complete implementation
-- `opal/worker_single_stage.py`: Original worker implementation
-
-## Support
-
-For questions or issues:
-1. Check debug logs
-2. Review configuration parameters
-3. Compare with worker_single_stage.py behavior
-4. Open GitHub issue with reproduction steps
 
 ---
 
 **Author**: Opal Simulator Team  
-**Date**: 2026-03-11  
-**Version**: 2.0.0  
-**Branch**: vllm_sched
+**Date**: 2026-05-11  
+**Version**: 3.0.0

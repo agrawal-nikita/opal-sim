@@ -1,63 +1,170 @@
 # Configuring Opal 
 
-TODO: add the default parameters for all, and auto generate documentation. 
+Opal is configured via a JSON file. All parameters have defaults defined in `configs/defaults.json`. You can override any subset of parameters by passing your own config file — only the keys you specify are overridden.
 
-### simulation
-  * `simulation_time` : run the simulation for the given seconds. If given as -1, then run the simulation until the workload finishes which typically is either (i) total amount of requests have been generated; or (ii) all trace events have been replayed.  
-  * `seed`: python random seed 
-  * `num_worker`: initial number of llm workers 
-    * todo: move it to worker 
+---
 
-### model
-  * `name` : the model name 
-  * `config_dir` : model config file if you have it locally in some directory. 
+## simulation
 
- TODO: use the hf tokens, and model loading logic and to make it clean. 
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `simulation_time` | float | `-1.0` | Run the simulation for the given virtual seconds. If `-1`, run until the workload finishes (all requests generated or all trace events replayed). |
+| `seed` | int | `42` | Python random seed for reproducibility. |
+| `num_workers` | int | `1` | Initial number of LLM workers at simulation start. |
+| `save_simulation_data` | bool | `true` | Save per-request statistics and simulation results to the output directory. |
+| `show_progress` | bool | `false` | Show a tqdm progress bar during the simulation. |
 
- ### router
-  * `enable_scaling`: do dynamic worker scaling up. Deletion is not yet implemented 
-  * `max_queue_threshold`: at what max queue size at any worker, we add another worker. 
-  * `scale_latency`: how much time it takes to start a new worker 
-  * `max_workers`: how many max workers we should scale up to
+---
 
-### workload 
-  * `type`: what workload to run, there are three supported type: `UniformReqRate` (uniform sampling), `ExponentialReqRate` (poisson arrival) and `Moonshot` (trace).
-  * `request_rate`: mean requests generated per second. 
-  * `total_request`: total number of requests to generate. If this is -1, then the simulation will run for simulation_time (virtual) seconds or all entries from a trace are replayed. If this is > 0 with trace replaying, then only first total_request entries are replayed from the trace. 
-  * `prompt_size_min` and `prompt_size_max`: min and max prompt sizes. We uniformly sample the prompt size from this range.    
-  * `default_prefix_length`: how much of a prefix to sample from the previous request so that there is a hit rate (not yet implemented). 
-  * `chunk_size`: in case of traces, what is the chunk_size used in the hashes 
-  * `jitter`: when doing ExponentialReqRate sampling how much to deviate from the mean value. 0 = not at all, close to the uniform sampling, 1.0 = as much as allowed, maximum. 
-  * `trace_file`: when the workload type is Moonshot, this trace_file is replayed. 
+## model
 
-### worker 
- * `single_stage`: we have two worker types, single or dual stage. Single stage worker has kvc fetching and GPU processing as a single stage. Hence every request goes with two stages in a single go. The number of concurrent with the single stage worker is min(`max_kvc_inflight`, `max_gpu_inflight`). When this is false, dual stage worker is used where kvc fetching and gpu processing can be scaled independently. 
- * `max_kvc_inflight`: maximum number of requests that can have kvc fetching request in flight per worker. 
- * `max_gpu_inflight`: maximum number of requests that can have GPU computation going on per worker. 
- * `worker_local_queue_capacity`: each worker's queue capacity on which the router queues the request. 
- * `fixed_gpu_latency`: When I added this parameter only I and God knew what I meant. Now only God knows. 
+Nested under `model.model_params`:
 
- in the `hw` section: 
-  * `gpu`: Which GPU (name)
-  * `tflops`: teraflops capacity of the GPU
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | string | `"granite-3.3-8b-instruct"` | Model name. Used to resolve the config from a local directory or HuggingFace. |
+| `config_dir` | string | `"./model-configs/"` | Local directory containing the model's `config.json`. If present, the model is loaded from `<config_dir>/<name>/config.json`. |
+| `hf_url` | string | — | HuggingFace model identifier (e.g., `"ibm-granite/granite-3.3-8b-instruct"`). If set, the config is fetched from HuggingFace. Mutually exclusive with `config_dir`. |
 
-in the `inference_params` section: 
- * `model`: which prefill analytical model to use to predict the TTFT times. Supported models are: `moonshot` or `exponential`. The former uses `a` and `b` regression parameter. No need to change them at the moment. The latter uniformly samples the latency between [0, `mean_latency_secs`]. 
-     * TODO: to be fixed so that atleast it takes input token sizes as a parameter.
- * `mean_latency_secs`: mean TTFT latency when using the `exponential` analytical model for TTFT latency predictions. 
- * `a` and `b`: regression constants in the `moonshot` analytical model. 
+---
 
+## router
 
-Moonshot analytical model for TTFT:  $L . (a . N . D^2 + b . N^2 .D)$ where L = number of layer, D = model dimensions, N = input prompt length, and (a, b) are environment and infrastructure specific regression parameters. 
+Nested under `router.router_params`:
 
-### kvc 
-This is mean to cover tiering and policies for kvc management. Currently it is work in progress. 
- * `kvc_tiers` : which tiers are enabled for kvc. 1 = GPU, 2 = CPU DRAM, 3 = local NVMe, 4 = distributed, shared storage. 
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `policy` | string | `"MaxPrefix"` | Routing policy. Supported: `RoundRobin`, `LeastLoaded`, `Random`, `MaxPrefix`, `Balanced`. |
+| `enable_scaling` | bool | `false` | Enable dynamic worker scale-up when queues exceed threshold. |
+| `max_queue_threshold` | int | `4` | When any worker's queue reaches this size, trigger a scale-up event. |
+| `scale_latency` | float | `40` | Virtual seconds it takes to start a new worker after a scale-up is triggered. |
+| `max_workers` | int | `50` | Maximum number of workers to scale up to. |
+| `periodic_infra_update_collection_time` | float | `30` | Interval (virtual seconds) at which the router collects infrastructure status from workers. |
+| `max_event_batch_size` | int | `64` | Maximum number of requests the router dispatches per scheduling cycle. |
 
-### storage 
-Performance characteristics of storage tier locations. 
+---
 
-  * `backend`: which backend to use? `DFSBackend` or `FixedLatBackend`. DFS is meant to emulate a distributed shared file system. While `FixedLatBackend` has infinite bandwidth and fixed latency for all operations (used in debugging). You can define your own local backend that will be dynamically loaded from `./storage_backend/` folder. 
-  * `max_bandwidth`: maximum bandwidth for the `DFSBackend` backend that is shared between all concurrent requests in-flight. 
-  * `min_latency`: what is the latency (network delay) in seconds. 
-  * `fixed_latency_useconds`: fixed latency in microseconds. 
+## workload
+
+Workloads are defined as a list of stages under `workload.stages`. Each stage has a `type` and a `workload_params` dict. Stages run sequentially.
+
+### Workload types
+
+| Type | Description |
+|------|-------------|
+| `UniformReqRate` | Generates requests at a uniform rate. |
+| `ExponentialReqRate` | Poisson arrival process with configurable jitter. |
+| `trace` | Replays requests from a JSONL trace file. |
+
+### Common workload_params (UniformReqRate, ExponentialReqRate)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `request_rate` | float | `2.0` | Mean requests generated per virtual second. |
+| `total_requests` | int | `100` | Total number of requests to generate. `-1` means run for `simulation_time` or until trace exhausted. |
+| `prompt_size_min` | int | `32` | Minimum prompt size (tokens). Uniformly sampled from `[min, max]`. |
+| `prompt_size_max` | int | `16384` | Maximum prompt size (tokens). |
+| `output_tokens_min` | int | `32` | Minimum output/decode tokens per request. |
+| `output_tokens_max` | int | `128` | Maximum output/decode tokens per request. |
+| `default_prefix_length` | int | `1024` | Length of shared prefix sampled from previous requests (for KV cache hit simulation). |
+| `jitter` | float | `0.0` | (ExponentialReqRate only) Controls deviation from mean inter-arrival time. `0` = nearly uniform, `1.0` = maximum variance. |
+| `max_outstanding_requests` | int | — | Optional. If set, limits how many requests can be in-flight before the workload pauses generation. |
+
+### Trace workload_params
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `total_requests` | int | `10` | Number of trace entries to replay. `-1` = replay all. |
+| `chunk_size` | int | `1` | Chunk size used for prefix hashing in trace replay. |
+| `multiplier_to_sec` | float | `0.001` | Multiplier to convert trace timestamps to virtual seconds (e.g., `0.001` for milliseconds). |
+| `trace_file` | string | — | Path to the JSONL trace file. |
+
+---
+
+## worker
+
+### worker.worker_params
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `worker_local_queue_capacity` | int | `1` | Each worker's local queue capacity where the router places incoming requests. |
+| `periodic_infra_update_time` | float | `30` | Interval (virtual seconds) at which the worker reports its status to the router. |
+| `kvcevent_coalesce_time` | float | `30` | Time window for coalescing KV cache events before processing. |
+
+### worker.hw
+
+Hardware specification for each worker.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `gpu` | string | `"H100"` | GPU name (informational). |
+| `memory_gb` | float | `80` | GPU memory in GB. Used to compute KV cache capacity and scheduling limits. |
+| `tflops` | float | `989.5` | GPU peak TFLOPS. Used by the roofline inference model. |
+| `mem_bw_TBps` | float | `3.3` | GPU memory bandwidth in TB/s. Used by the roofline inference model. |
+| `tp` | int | `1` | Tensor parallelism degree. |
+
+### worker.vllm_params
+
+Parameters modeling the vLLM-style continuous batching scheduler.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `max_num_seqs` | int | `256` | Maximum number of sequences in a running batch. |
+| `max_num_batched_tokens` | int | `8192` | Maximum tokens processed in a single scheduler step. |
+| `max_kvc_ready_requests` | int | `8` | Maximum number of requests with KV cache ready waiting to enter the GPU batch. |
+| `chunked_prefill` | bool | `true` | Enable chunked prefill (split long prefills across multiple steps). |
+| `block_size` | int | `16` | KV cache block size in tokens (paged attention). |
+
+### worker.inference_params
+
+Controls the analytical model used to predict prefill (TTFT) and decode latency.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `model` | string | `"roofline"` | Inference latency model. Supported: `roofline` (uses hardware specs to compute latency analytically) or `synthetic` (fixed mean latency). |
+| `mean_latency_secs` | float | `1.0` | Mean latency per step when using the `synthetic` model. |
+| `a` | string | `"4"` | Regression constant (legacy, used in older moonshot model). |
+| `b` | string | `"24"` | Regression constant (legacy, used in older moonshot model). |
+
+---
+
+## kvc
+
+KV cache management configuration for tiered storage.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `kvc_tiers` | list[string] | `["CPUMemory"]` | Which storage tiers are enabled. Supported: `CPUMemory`, `LocalNVMe`, `DistributedFS`. |
+| `chunk_size` | int | `256` | KV cache chunk size in tokens. Determines granularity of cache storage and lookup. |
+| `save_unfull_chunk` | bool | `true` | Whether to save partial (not full) chunks to the cache. |
+
+### Tier configurations
+
+Each tier is configured as a separate object keyed by its name:
+
+#### CPUMemory (host DRAM)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `bandwidth_GBps` | float | `50` | Read/write bandwidth in GB/s. |
+| `latency_nsec` | float | `200` | Access latency in nanoseconds. |
+| `concurrency` | int | `1000000` | Maximum concurrent I/O operations. |
+| `capacity_GB` | float | `8` | Total capacity in GB. |
+
+#### LocalNVMe
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `bandwidth_GBps` | float | `10` | Read/write bandwidth in GB/s. |
+| `latency_nsec` | float | `10000` | Access latency in nanoseconds. |
+| `concurrency` | int | `1000` | Maximum concurrent I/O operations. |
+| `capacity_GB` | float | `1024` | Total capacity in GB. |
+
+#### DistributedFS
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `bandwidth_GBps` | float | `100` | Aggregate bandwidth in GB/s (shared across all workers). |
+| `latency_nsec` | float | `100000` | Network + access latency in nanoseconds. |
+| `concurrency` | int | `1000` | Maximum concurrent I/O operations. |
+| `capacity_GB` | float | `1048576` | Total capacity in GB (effectively unlimited). |

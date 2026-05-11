@@ -3,8 +3,5 @@ Opal is discrete event-based simulator that you run on your laptop to simulate w
 
 
 ## Resources 
-  * On slack, please join #dev-opal-sim 
-  * GitHub issues: https://github.ibm.com/kvc-storage/opal-sim/issues 
+  * GitHub issues: [[https://github.com/IBM/opal-sim/issues ](https://github.com/IBM/opal-sim/issues)](https://github.com/IBM/opal-sim/issues)
 
-## Contact 
-Any admin request, just send a message to Radu or Animesh 

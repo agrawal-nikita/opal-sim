@@ -6,11 +6,11 @@
 * [[Examples]]
 * Code Commentary 
   * [[Simpy Basics]] 
-  * [KVCache manager](https://github.ibm.com/kvc-storage/opal-sim/wiki/KVCache-manager)
-  * [Router](https://github.ibm.com/kvc-storage/opal-sim/wiki/Router)
-  * [vLLM modeling](https://github.ibm.com/kvc-storage/opal-sim/wiki/vLLM-modeling)
-  * [Worker](https://github.ibm.com/kvc-storage/opal-sim/wiki/Worker)
-  * [Workload generation](https://github.ibm.com/kvc-storage/opal-sim/wiki/Workload-generation)
+  * [KVCache manager](KVCache-manager)
+  * [Router](Router)
+  * [vLLM modeling](vLLM-modeling)
+  * [vLLM Worker](vLLM-Worker)
+  * [Workload generation](Workload-generation)
   * [[Statistics collection and processing]] 
 * [[Contributing]]
 * [[Testing]]
