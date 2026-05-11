@@ -14,6 +14,8 @@
     - [Installing `pypy`](#installing-pypy)
     - [Running opal with `pypy`](#running-opal-with-pypy)
     - [Contributions](#contributions)
+- [Contacts / questions](#contacts--questions)
+- [License](#license)
 
 <p align="center">
 <figure>
@@ -35,6 +37,27 @@ This guide is just to get you started. We will add more details to the wiki as t
 
   * **Wiki:** [https://github.com/IBM/opal-sim/wiki](https://github.com/IBM/opal-sim/wiki)
 
+
+If you find this project useful, then please cite using: https://doi.org/10.1145/3805621.3807623
+
+```bibtex
+@inproceedings{2026-euromlsys-opal,
+author = {Trivedi, Animesh and Stoica, Radu and Cohn, Jeremy and Harnik, Danny and Zhu, Yue and Terner, Jonathan and Margalit, Guy and Schmuck, Frank and Tarasov, Vasily and Sundararaman, Swaminathan},
+title = {A Case for a Simulation-Driven Exploration of Distributed GenAI Platforms},
+year = {2026},
+isbn = {9798400726057},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+url = {https://doi.org/10.1145/3805621.3807623},
+doi = {10.1145/3805621.3807623},
+booktitle = {Proceedings of the Sixth European Workshop on Machine Learning and Systems},
+pages = {286–295},
+numpages = {10},
+keywords = {GenAI, LLM inference, Simulation, Performance},
+series = {EuroMLSys '26}
+}
+```
+
 ## Dependencies
 We recommend using a Python virtual environment to get started. You can use either **conda** or **uv** (a fast Python package installer and resolver). If you already have these dependencies installed in the global environment, that is also fine.
 
@@ -48,7 +71,7 @@ conda activate opal-dev
 git clone and install the requirements
 
 ```shell
-git clone git@github.ibm.com:zrl-cloud-data-platforms/opal-sim.git
+git clone git@github.com:IBM/opal-sim.git
 cd opal-sim
 python -m pip install -r ./requirements.txt
 ```
@@ -67,7 +90,7 @@ pip install uv
 Then clone and set up the project:
 
 ```shell
-git clone git@github.ibm.com:zrl-cloud-data-platforms/opal-sim.git
+git clone git@github.com:IBM/opal-sim.git
 cd opal-sim
 
 # Create a virtual environment with Python 3.11
@@ -156,12 +179,12 @@ Python Garbage collector stats:
 =========
 ```
 
-When this command is executed, it takes the default config file `./opal/sim_config/defaults.json` and runs the simulation. The `-g` flag tells it to produce the final graphs as well. You can pass a config file with the `-c` parameter like 
+When this command is executed, it takes the default config file `./configs/defaults.json` and runs the simulation. The `-g` flag tells it to produce the final graphs as well. You can pass a config file with the `-c` parameter like 
 ```shell 
-python ./opal/opal.py -c ./opal/sim_config/your_config.json -g
+python ./opal/main.py -c ./configs/your_config.json -g
 ```
 
-In the `./simulation-runs/` folder you should see a new folder named with the current date and time containing the full simulation output. You should see directories like `stage_0`, `stage_1`, and `stage_2`. Within these folders are graphs and JSON files. 
+In the `./simulation-runs/` folder (the default location) you should see a new folder named with the current date and time containing the full simulation output. You should see directories like `stage_0`, `stage_1`, and `stage_2`. Within these folders are graphs and JSON files. 
 
 ## What are simulation outputs 
 
@@ -176,6 +199,8 @@ Each run of the simulation is saved in the `simulation-run` folder (default). Th
 In the top-level folder, you should have: 
   * `sim_config.json`: the simulation config that was used for this run. 
   * `simulation.log`: the simulation log file containing all the output. See the [Logging](#logging) section.
+
+**NOTES:** some of these graph may be broken, we are working through to fix them one-by-one. If you found an issue please open an issue on Github (or better open a pull request). 
 
 ## Logging 
 There is an environment variable `OPAL_LOG_LEVEL` that you can set to change the logging level between `INFO` (default), `DEBUG`, `WARN`, or `ERROR`. 
@@ -192,7 +217,7 @@ OPAL_LOG_LEVEL=DEBUG PYTHONPATH=`pwd`:$PYTHONPATH ./opal/main.py
 ```
 
 ## Configuration 
-We have a single JSON file with all the parameters for the simulation. For documentation of this configuration file, please see: https://github.ibm.com/kvc-storage/opal-sim/wiki/Configuration-Simulation
+We have a single JSON file with all the parameters for the simulation. For documentation of this configuration file, please see the wiki: https://github.com/IBM/opal-sim/wiki
 
 ## Development 
 
@@ -205,7 +230,7 @@ to see the output and details run with `-s` and `-v` flags.
 
 To run a specific test: 
 ```shell
-opal-sim$ OPAL_LOG_LEVEL=DEBUG pytest -s -v ./tests/test_runtimes.py
+opal-sim$ OPAL_LOG_LEVEL=DEBUG pytest -s -v ./tests/test_configs.py
 ```
 
 
@@ -255,21 +280,22 @@ We cannot specify Hugging Face models now as the `transformers` library is not f
   "model": {
     "model_params": {
       "name": "Llama-3.3-70B-Instruct",
-      "config_dir": "./opal/model_config/"
+      "config_dir": "./model_config/"
     }
   },
 ```
+This will look for a config file in the location: `./model_config/Llama-3.3-70B-Instruct/config.json` for the model config file. Make sure this exists. 
 
 With this, it should now work with `pypy` as follows: 
 ```shell 
 pypy3 ./opal/main.py
 ```
 
-**NOTE:** Performance gains from `pypy` will only materialize for long-running simulations, as JIT compilation needs time to warm up. We see almost 2x speedup in the case where Moonshot traces are replayed with a single worker. 
+**NOTE:** Performance gains from `pypy` will only materialize for long-running simulations, as JIT compilation needs time to warm up. We see almost 2x speedup in the case where the Moonshot conversation trace is replayed with a single worker. 
 
 With python:
 ```shell 
-$ python ./opal/main.py -c ~/zrl/github/opal-sim/opal/sim_config/moonshot-1.json
+$ python ./opal/main.py -c ./configs/moonshot-1.json
 ...
 
 INFO(environment.py:149): Simulation completed in 142.53 seconds (wall clock time) for 10268.00 virtual seconds | speed up 72.04x
@@ -304,7 +330,7 @@ P99 ITL (ms)                            :        2,081.82
 
 With `pypy`: 
 ```shell 
-$ pypy3 ./opal/main.py -c ~/zrl/github/opal-sim/opal/sim_config/moonshot-1.json
+$ pypy3 ./opal/main.py -c ./configs/moonshot-1.json
 ... 
 INFO(environment.py:149): Simulation completed in 58.15 seconds (wall clock time) for 10268.00 virtual seconds | speed up 176.58x
 ===== stage_0 =====
@@ -345,3 +371,9 @@ python -m pip install black
 # once you are ready with the code, run from the top-level directory 
 sh-black-formatter.sh 
 ```
+
+# Contacts / questions 
+If you have questions or issues, open an issue and tag @animeshtrivedi and @raduioanstoica 
+
+# License 
+Opal is released under the Apache License 2.0. 
