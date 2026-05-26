@@ -32,18 +32,21 @@ cd opal-sim
 uv venv --python 3.11
 source .venv/bin/activate
 uv pip install -e .
+
+# (Optional) enable the repo's pre-commit hook (Black formatter)
+git config core.hooksPath .githooks
 ```
 
 ### Run Basic Simulation
 ```bash
-# From project root
-PYTHONPATH=`pwd`:$PYTHONPATH python ./opal/main.py
+# From project root (main.py self-extends sys.path; PYTHONPATH not required)
+python ./opal/main.py
 
-# With custom config
-PYTHONPATH=`pwd`:$PYTHONPATH python ./opal/main.py -c ./configs/defaults.json -g
+# With custom config and graphs
+python ./opal/main.py -c ./configs/defaults.json -g
 
 # With debug logging
-OPAL_LOG_LEVEL=DEBUG PYTHONPATH=`pwd`:$PYTHONPATH python ./opal/main.py
+OPAL_LOG_LEVEL=DEBUG python ./opal/main.py
 ```
 
 ### Run Tests
@@ -52,7 +55,7 @@ OPAL_LOG_LEVEL=DEBUG PYTHONPATH=`pwd`:$PYTHONPATH python ./opal/main.py
 pytest
 
 # Specific test with verbose output
-OPAL_LOG_LEVEL=DEBUG pytest -s -v ./tests/tests_configs.py
+OPAL_LOG_LEVEL=DEBUG pytest -s -v ./tests/test_configs.py
 
 # With output shown
 pytest -s -v
@@ -107,7 +110,7 @@ opal-sim/
 │   ├── llm_model.py               # OpalModelConfig (HF or local config loading)
 │   │
 │   ├── request.py                 # LLMRequest, LLMRequestStats, IORequest
-│   ├── datatypes.py               # (currently empty)
+│   ├── datatypes.py               # STR_DTYPE_TO_BYTES (dtype → byte-size map)
 │   ├── events.py                  # KVCEvent, SystemEvent, OpalInfraEvent
 │   ├── stage_statistics.py        # StageStatistics collection
 │   ├── plot.py                    # Plotting utilities
@@ -124,7 +127,8 @@ opal-sim/
 │       └── README.md
 │
 ├── configs/                       # Configuration files
-│   └── defaults.json              # Default configuration
+│   ├── defaults.json              # Default configuration (local model dir)
+│   └── hf.json                    # Variant that pulls model config from Hugging Face
 │
 ├── model-configs/                 # Local model configurations
 │   └── granite-3.3-8b-instruct/
@@ -134,11 +138,11 @@ opal-sim/
 │   └── hello.jsonl                # Example trace
 │
 ├── tests/                         # Unit tests
-│   └── tests_configs.py           # Config loading + run tests
+│   └── test_configs.py            # Parametrized config loading + run tests
 │
 ├── wiki/                          # Documentation (cloned from GitHub wiki)
 │   ├── Configuration-Simulation.md
-│   ├── VLLM_WORKER.md
+│   ├── vllm-worker.md
 │   ├── vLLM-modeling.md
 │   ├── KVCache-manager.md
 │   ├── Router.md
@@ -146,10 +150,13 @@ opal-sim/
 │   ├── Workload-generation.md
 │   ├── Running.md
 │   ├── Running-Workloads.md
+│   ├── Install-Requirements.md
 │   ├── Config-Usage-Tracking.md
 │   ├── Examples.md
 │   ├── Home.md
 │   ├── Overview.md
+│   ├── README.md
+│   ├── _Sidebar.md
 │   └── opal-overview.png
 │
 ├── simulation-runs/               # Output directory (gitignored)
@@ -198,7 +205,7 @@ opal-sim/
 ### Basic Execution
 ```bash
 # Default config (./configs/defaults.json)
-PYTHONPATH=`pwd`:$PYTHONPATH python ./opal/main.py
+python ./opal/main.py
 
 # Custom config with graphs
 python ./opal/main.py -c ./configs/defaults.json -g
@@ -212,10 +219,9 @@ python ./opal/main.py -o ./my-results/
 python ./opal/main.py --help
 
 Options:
-  -c, --config PATH       Configuration file (default: defaults.json)
-  -g, --graphs           Generate plots
-  -o, --output PATH      Output directory (default: ./simulation-runs/)
-  --no-graphs            Disable graph generation
+  -c, --config PATH                    Configuration file (default: configs/defaults.json)
+  -o, --output-dir PATH                Output directory (default: ./simulation-runs/)
+  -g, --graphs / --no-graphs           Generate graphs (default: False)
 ```
 
 ### Environment Variables
@@ -230,7 +236,7 @@ OPAL_LOG_FORMAT=1
 OPAL_NO_COLOR=1
 
 # Example with all options
-OPAL_LOG_LEVEL=DEBUG OPAL_LOG_FORMAT=2 PYTHONPATH=`pwd`:$PYTHONPATH python ./opal/main.py
+OPAL_LOG_LEVEL=DEBUG OPAL_LOG_FORMAT=2 python ./opal/main.py
 ```
 
 ### Output Structure
@@ -506,7 +512,12 @@ git push origin feature/my-feature
 ```
 
 ### Pre-commit Hook
-The repository has a pre-commit hook that runs Black formatter automatically.
+The repository ships a pre-commit hook at `.githooks/pre-commit` that runs Black
+automatically. It is **not** installed by default — enable it once per clone with:
+
+```bash
+git config core.hooksPath .githooks
+```
 
 ---
 
@@ -515,22 +526,22 @@ The repository has a pre-commit hook that runs Black formatter automatically.
 ### Test Structure
 ```
 tests/
-└── tests_configs.py           # Parametrized config loading + run tests
+└── test_configs.py            # Parametrized config loading + run tests
 ```
 
-**Note:** `pyproject.toml` sets `python_files = ["test_*.py"]` for pytest discovery, but
-the current test file is named `tests_configs.py`. Run it explicitly or adjust naming.
+The test is parametrized over every `*.json` file in `configs/`, so adding a new
+config file automatically adds a new test case.
 
 ### Running Tests
 ```bash
-# All tests
+# All tests (auto-discovered via pyproject.toml: python_files = ["test_*.py"])
 pytest
 
 # Run the config test explicitly
-pytest -s -v tests/tests_configs.py
+pytest -s -v tests/test_configs.py
 
 # With debug logging
-OPAL_LOG_LEVEL=DEBUG pytest -s -v tests/tests_configs.py
+OPAL_LOG_LEVEL=DEBUG pytest -s -v tests/test_configs.py
 ```
 
 ### Writing Tests
@@ -763,7 +774,8 @@ cat simulation-runs/sim-*/stage_0/opal_stats.json | jq
 
 **1. Import Errors**
 ```bash
-# Always set PYTHONPATH
+# main.py self-extends sys.path, so this is normally not needed.
+# Set PYTHONPATH only if you invoke modules directly with `python -m ...`
 PYTHONPATH=`pwd`:$PYTHONPATH python ./opal/main.py
 ```
 
@@ -806,7 +818,7 @@ grep -r "print(" opal/ --exclude-dir=__pycache__
 grep -r "yield " opal/vllm_worker.py
 
 # Run tests
-pytest -s -v tests/tests_configs.py
+pytest -s -v tests/test_configs.py
 ```
 
 ### Performance Profiling
@@ -825,7 +837,7 @@ profile_function(lambda: sim.run())
 
 ### Documentation (wiki/ directory)
 - **Configuration:** `wiki/Configuration-Simulation.md`
-- **vLLM Worker:** `wiki/VLLM_WORKER.md`
+- **vLLM Worker:** `wiki/vllm-worker.md`
 - **vLLM Modeling:** `wiki/vLLM-modeling.md`
 - **KV Cache Manager:** `wiki/KVCache-manager.md`
 - **Router:** `wiki/Router.md`
@@ -899,7 +911,7 @@ PYTHONPATH           - Must include project root
 **For AI Agents:** This document provides the essential context needed to understand and work with the OPAL simulator codebase. When making changes:
 
 1. Read relevant documentation in `wiki/` first
-2. Run tests after changes: `pytest -s -v tests/tests_configs.py`
+2. Run tests after changes: `pytest -s -v tests/test_configs.py`
 3. Format code with Black: `./sh-black-formatter.sh`
 4. Add co-author to commits
 5. Update this file if adding new patterns or components
