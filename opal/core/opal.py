@@ -4,11 +4,12 @@ import os
 
 # Add project root to PYTHONPATH to enable direct execution from the current directory
 # sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from opal.stage_statistics import StageStatistics
-from opal.plot import simend_plot
-from opal.util import check_and_create_directory
-from opal.environment import OpalSimulatorEnvironment
-from opal.opal_config import OpalConfig
+from opal import DEFAULT_CONFIG_FILE, PROJECT_ROOT
+from opal.stats.stage_statistics import StageStatistics
+from opal.stats.plot import simend_plot
+from opal.utils.util import check_and_create_directory
+from opal.core.environment import OpalSimulatorEnvironment
+from opal.config.opal_config import OpalConfig
 import gc
 
 import faulthandler
@@ -33,8 +34,7 @@ class OpalSimulator:
             description="Welcome to OpalSim, the ultimate GenAI simulator",
             formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         )
-        parent_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        self.default_modelling_output = os.path.join(parent_path, "simulation-runs")
+        self.default_modelling_output = os.path.join(PROJECT_ROOT, "simulation-runs")
         self.parser.add_argument(
             "-o",
             "--output-dir",
@@ -43,7 +43,7 @@ class OpalSimulator:
             default=self.default_modelling_output,
             required=False,
         )
-        default_sim_conf = os.path.join(parent_path, "configs/defaults.json")
+        default_sim_conf = DEFAULT_CONFIG_FILE
         self.parser.add_argument(
             "-c",
             "--config",

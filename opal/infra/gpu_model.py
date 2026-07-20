@@ -2,8 +2,8 @@
 from hmac import new
 import logging
 
-from opal.llm_model import OpalModelConfig
-from opal.util import generate_time_with_rate_variation
+from opal.config.llm_model import OpalModelConfig
+from opal.utils.util import generate_time_with_rate_variation
 
 
 class GPUModel:

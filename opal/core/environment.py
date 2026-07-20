@@ -9,13 +9,13 @@ import sys, os
 import logging
 import time
 import numpy as np
-from opal.opal_config import OpalConfig
-from opal.llm_model import get_model
-from opal.opal_registery import OpalRegistry
-from opal.router import Router
-from opal.util import check_and_create_directory
-from opal.opal_logging import reset_logging_formatter, setup_logging
-from opal.workload_orchestrator import WorkloadOrchestrator
+from opal.config.opal_config import OpalConfig
+from opal.config.llm_model import get_model
+from opal.core.opal_registery import OpalRegistry
+from opal.router.router import Router
+from opal.utils.util import check_and_create_directory
+from opal.utils.opal_logging import reset_logging_formatter, setup_logging
+from opal.workloads.workload_orchestrator import WorkloadOrchestrator
 
 # make sure printing is done properly
 sys.stdout.reconfigure(line_buffering=True)

@@ -2,9 +2,9 @@
 from __future__ import annotations
 import logging
 
-from opal.events import KVCEvent, KVCEventType, SystemEvent
-from opal.kvc_manager import OpalKVCacheEngine
-from opal.request import LLMRequest
+from opal.core.events import KVCEvent, KVCEventType, SystemEvent
+from opal.kvcache.kvc_manager import OpalKVCacheEngine
+from opal.core.request import LLMRequest
 
 
 class OpalWorkerState:

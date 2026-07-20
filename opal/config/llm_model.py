@@ -8,7 +8,7 @@ import re
 from typing import Dict, Any, Optional
 from pprint import pprint, pformat
 
-from opal.datatypes import STR_DTYPE_TO_BYTES
+from opal.core.datatypes import STR_DTYPE_TO_BYTES
 
 
 class OpalModelConfig:

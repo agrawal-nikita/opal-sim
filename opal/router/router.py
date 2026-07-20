@@ -6,11 +6,11 @@ from typing import Any
 import simpy
 import logging
 import numpy as np
-from opal.events import OpalInfraEvent, KVCEvent, SystemEvent
-from opal.kvbm import KVBM
-from opal.request import LLMRequest
-from opal.vllm_worker import LLMWorkerVLLMScheduler
-from opal.util import parse_bool, safe_process
+from opal.core.events import OpalInfraEvent, KVCEvent, SystemEvent
+from opal.kvcache.kvbm import KVBM
+from opal.core.request import LLMRequest
+from opal.worker.vllm_worker import LLMWorkerVLLMScheduler
+from opal.utils.util import parse_bool, safe_process
 
 
 class Router:
@@ -133,7 +133,7 @@ class Router:
         self.log.debug(f"Breaking the per second scaling loop at {self.sim_env.now}")
 
     def _per_second_stats(self):
-        from opal.stage_statistics import StageStatistics
+        from opal.stats.stage_statistics import StageStatistics
 
         last = 0
         while not self.opal_env.are_we_done():
