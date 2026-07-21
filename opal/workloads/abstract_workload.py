@@ -49,6 +49,8 @@ class AbstractWorkload:
         self.log.debug(
             f"queuing to the result queue {request}, current queue length {len(self._router_response_queue.items)}"
         )
+        if not request.has_completed.triggered:
+            request.has_completed.succeed(request)
         yield self._router_response_queue.put(request)
 
     def _process_responses(self):
