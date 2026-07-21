@@ -4,6 +4,8 @@ import json
 import logging
 import os
 
+from opal import DEFAULT_CONFIG_FILE
+
 """
 from collections import defaultdict
 
@@ -130,7 +132,7 @@ class ConfigProxy:
 class OpalConfig:
     def __init__(self):
         self.log = logging.getLogger("OpalConfig")
-        self.default_config_file = os.path.normpath(os.path.join(os.path.dirname(__file__), "../configs/defaults.json"))
+        self.default_config_file = DEFAULT_CONFIG_FILE
         self._config = None
         self._defaults = asdict(OpalDefaults())
         self._accessed_keys = set()  # Track which config keys are accessed

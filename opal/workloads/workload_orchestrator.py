@@ -6,21 +6,20 @@ import inspect
 import logging
 import os
 
-from opal.request import LLMRequest
-from opal.stage_statistics import StageStatistics
-from opal.util import safe_process
+from opal.core.request import LLMRequest
+from opal.stats.stage_statistics import StageStatistics
+from opal.utils.util import safe_process
 from opal.workloads.abstract_workload import AbstractWorkload
 
 
-def load_class_from_folder(folder_path: str, class_name: str):
-    # Get absolute path relative to this file
-    script_dir = os.path.dirname(__file__)  # directory of environment.py
-    # concatenate with the passed folder path
-    abs_folder_path = os.path.join(script_dir, folder_path)
+def load_class_from_folder(class_name: str):
+    # Workload implementations live alongside this module, in the workloads package.
+    abs_folder_path = os.path.dirname(__file__)
+    this_file = os.path.basename(__file__)
     classes_found = []
     # check the files names
     for filename in os.listdir(abs_folder_path):
-        if filename.endswith(".py") and filename != "__init__.py":
+        if filename.endswith(".py") and filename not in ("__init__.py", this_file):
             file_path = os.path.join(abs_folder_path, filename)
             module_name = filename[:-3]
             spec = importlib.util.spec_from_file_location(module_name, file_path)
@@ -71,7 +70,7 @@ class WorkloadOrchestrator:
             self.log.debug(f"There are {len(stages)} stages of : {stages} workloads")
             for i, s in enumerate(stages):
                 self.log.debug(f"Loading {[i]} as {s['type']}")
-                workload_class = load_class_from_folder("workloads", s["type"])
+                workload_class = load_class_from_folder(s["type"])
                 # FIXME: remove the dependency of the router from the workload
                 self.stages.append(workload_class(self.opal_env, i, s, self.router))
                 # allocates the stage-level metrics tracking

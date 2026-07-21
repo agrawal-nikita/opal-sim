@@ -8,8 +8,8 @@ import os
 import re
 import numpy as np
 
-from opal.request import LLMRequest
-from opal.util import generate_time_with_rate_variation
+from opal.core.request import LLMRequest
+from opal.utils.util import generate_time_with_rate_variation
 from opal.workloads.abstract_workload import AbstractWorkload
 
 

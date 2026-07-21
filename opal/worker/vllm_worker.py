@@ -74,12 +74,12 @@ import itertools
 
 import simpy
 
-from opal.events import KVCEvent, SystemEvent
-from opal.gpu_model import GPUModel
-from opal.kvc_manager import OpalKVCacheEngine
-from opal.llm_model import OpalModelConfig
-from opal.request import LLMRequest
-from opal.util import parse_bool, safe_process
+from opal.core.events import KVCEvent, SystemEvent
+from opal.infra.gpu_model import GPUModel
+from opal.kvcache.kvc_manager import OpalKVCacheEngine
+from opal.config.llm_model import OpalModelConfig
+from opal.core.request import LLMRequest
+from opal.utils.util import parse_bool, safe_process
 
 # ================================================================================
 # SCHEDULER DATA STRUCTURES

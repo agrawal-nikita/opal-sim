@@ -6,8 +6,8 @@ import abc
 import logging
 import simpy
 import numpy as np
-from opal.request import LLMRequest
-from opal.util import get_with_timeout, safe_process
+from opal.core.request import LLMRequest
+from opal.utils.util import get_with_timeout, safe_process
 
 
 class AbstractWorkload:

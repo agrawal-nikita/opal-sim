@@ -3,9 +3,9 @@ import sys, os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from opal.util import get_bool_env_var
-from opal.opal_profile import profile_function
-from opal.opal import OpalSimulator
+from opal.utils.util import get_bool_env_var
+from opal.utils.opal_profile import profile_function
+from opal.core.opal import OpalSimulator
 
 if __name__ == "__main__":
     print(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))

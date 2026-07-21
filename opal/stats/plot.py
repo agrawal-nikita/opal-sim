@@ -2,8 +2,8 @@
 import logging
 import numpy as np
 import matplotlib.pyplot as plt
-from opal.util import sample_series_K
-from opal.stage_statistics import StageStatistics
+from opal.utils.util import sample_series_K
+from opal.stats.stage_statistics import StageStatistics
 import os
 
 logger = logging.getLogger("plot")

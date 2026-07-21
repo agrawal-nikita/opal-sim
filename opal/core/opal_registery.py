@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-from opal.router import Router
-from opal.vllm_worker import LLMWorkerVLLMScheduler
+from opal.router.router import Router
+from opal.worker.vllm_worker import LLMWorkerVLLMScheduler
 
 """
 This object resolves the issue of looking up different objects based on their indexes. 

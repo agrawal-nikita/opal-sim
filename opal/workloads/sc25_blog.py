@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import logging
 from random import Random
-from opal.request import LLMRequest
-from opal.util import safe_process
+from opal.core.request import LLMRequest
+from opal.utils.util import safe_process
 from opal.workloads.abstract_workload import AbstractWorkload
 import numpy as np
 

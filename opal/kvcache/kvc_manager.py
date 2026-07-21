@@ -12,9 +12,9 @@ import numpy as np
 
 from simpy import Environment, Event
 import simpy
-from opal.events import KVCEvent, KVCEventType
-from opal.io_model import AbstractDevice, CPUMemory, OpalIORequest, LocalNVMe, DistributedFS
-from opal.llm_model import OpalModelConfig
+from opal.core.events import KVCEvent, KVCEventType
+from opal.infra.io_model import AbstractDevice, CPUMemory, OpalIORequest, LocalNVMe, DistributedFS
+from opal.config.llm_model import OpalModelConfig
 from collections import OrderedDict
 
 import abc

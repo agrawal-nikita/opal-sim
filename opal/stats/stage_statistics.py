@@ -4,8 +4,8 @@ from collections import defaultdict
 from typing import List, Tuple
 import numpy as np
 
-from opal.request import LLMRequest, LLMRequestStats
-from opal.util import sample_series_K
+from opal.core.request import LLMRequest, LLMRequestStats
+from opal.utils.util import sample_series_K
 
 
 class StageStatistics:
