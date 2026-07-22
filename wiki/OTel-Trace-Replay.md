@@ -11,6 +11,38 @@ OTel replay is its own workload type (`otel`), separate from the legacy `trace` 
 
 > They can share the `.jsonl` extension, so the distinction is the **content**, not the filename. Setting the wrong `type` produces confusing errors (e.g. `AssertionError: 0 != None` when an OTel file is fed to the legacy `trace` workload).
 
+### Expected file structure
+
+The pieces of OTel replay live in a few well-known places. A checkout that can run replay looks like:
+
+```
+opal-sim/
+├── configs/
+│   └── defaults_otel.json              # example config with an `otel` workload stage
+├── traces/
+│   └── synthetic_otel_traces.jsonl     # example OTel trace to replay
+├── tools/agentic/
+│   ├── synthetic-trace-generator.py    # generates example OTel traces
+│   └── tokenizer.py                    # pre-tokenizes a raw trace (see below)
+```
+
+`trace_file` paths in a config are resolved relative to the repo root, which is why the examples read `traces/…`.
+
+### Ready-to-run example
+
+The repo ships a working example so you don't have to assemble one:
+
+- **Config:** [`configs/defaults_otel.json`](../configs/defaults_otel.json) — includes an `otel` stage pointed at the synthetic trace below.
+- **Trace:** [`traces/synthetic_otel_traces.jsonl`](../traces/synthetic_otel_traces.jsonl) — a synthetic multi-session OTel trace (produced by `tools/agentic/synthetic-trace-generator.py`).
+
+Run it directly:
+
+```bash
+python opal/main.py -c configs/defaults_otel.json
+```
+
+Use `defaults_otel.json` as the starting point for your own runs — copy it, then swap `trace_file`/`tokenizer` for your trace. The parameters below explain each field it sets.
+
 ### Minimal config
 
 Add a stage with `"type": "otel"` under `workload.stages`. The two required params are `trace_file` and (for raw traces) `tokenizer`:
@@ -82,10 +114,10 @@ This writes `traces/exagentic_v2_swebench-tokenized.jsonl`. Point `trace_file` a
 
 ### Running
 
-Point `main.py` at a config whose workload stage is the `otel` stage above:
+Point `main.py` at a config whose workload stage is the `otel` stage above. The shipped [`configs/defaults_otel.json`](../configs/defaults_otel.json) already is one:
 
 ```bash
-python opal/main.py -c configs/defaults.json -o out/
+python opal/main.py -c configs/defaults_otel.json
 ```
 
 ### Prerequisites
