@@ -1456,8 +1456,9 @@ class LLMWorkerVLLMScheduler:
                     )
                 elif tiered_prefix > 0:
                     # Tiered wins -- async fetch from CPU/DFS (FETCH_KVC block below).
+                    # Per-tier token attribution is recorded later in _async_kvc_retrieve,
+                    # once retrieve() reports the exact tokens served from each tier.
                     num_prefix_tokens = tiered_prefix
-                    req.llm_request.stats.set_kvc_tier_tokens(dict(req._kvc_tier_hit_tokens))
                 else:
                     # Miss in both tiers -> full prefill.
                     num_prefix_tokens = 0
