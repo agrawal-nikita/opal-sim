@@ -191,6 +191,7 @@ class VLLMSchedulerRequest(SchedulerRequest):
         self.apc_chain_hash: Optional[int] = None  # prefix-hash chain as of apc_resolved_tokens
         self.apc_private_blocks = 0         # unshared (partial-tail) blocks; freed directly at retire
         self._apc_hash_ids_ref: Optional[list] = None  # stable full-sequence id list (see _apc_hash_ids_for)
+        self._apc_prompt_chain: Optional[list] = None
 
 
 @dataclass
@@ -450,10 +451,9 @@ class LLMWorkerVLLMScheduler:
         )
         self._apc_block_source: dict = {}  # block_hash -> (hash_ids_ref, end_idx) for evict write-through
         kvc_chunk = self._kvc_manager.token_database.chunk_size
-        self._apc_blocks_per_victim = 1
         self.log.info(
             f"GPU APC enabled: policy={type(self._apc_policy).__name__}, block_size={self.block_size}, "
-            f"kvc_chunk={kvc_chunk}, blocks_per_victim={self._apc_blocks_per_victim}, ttl={vp.get('apc_lru_ttl', 0.0)}"
+            f"kvc_chunk={kvc_chunk}, ttl={vp.get('apc_lru_ttl', 0.0)}"
         )
 
     def _init_scheduler_config(self) -> VLLMSchedulerConfig:
@@ -513,9 +513,7 @@ class LLMWorkerVLLMScheduler:
     def _apc_promote_resident(self, request: "VLLMSchedulerRequest", up_to_tokens: int) -> None:
         """Register already-resident prompt blocks (e.g. just fetched from the
         KVC tier) into the APC table so they become shareable and tracked for
-        decref -- WITHOUT touching free_gpu_blocks, since those physical blocks
-        were already allocated by the fetch path. Keeps apc_resolved_tokens in
-        lockstep with prompt_processed after a KVC fetch."""
+        decref"""
         if not self.scheduler_config.enable_gpu_apc:
             return
         add = up_to_tokens - request.apc_resolved_tokens
@@ -526,6 +524,10 @@ class LLMWorkerVLLMScheduler:
             self._apc_token_db, self._apc_policy, self.block_size,
             ref, request.apc_resolved_tokens, add, chain_hash=request.apc_chain_hash,
         )
+        redundant = len(resolution.attach_hashes)
+        if redundant:
+            self.free_gpu_blocks += redundant
+            request.allocated_blocks -= redundant
         commit_apc_blocks(self._apc_policy, resolution, self._apc_block_source, ref)
         for block_hash, _end in resolution.new_block_hashes:
             request.apc_owned_hashes.add(block_hash)
@@ -595,8 +597,10 @@ class LLMWorkerVLLMScheduler:
             self._apc_policy.incref(block_hash)
             request.apc_owned_hashes.add(block_hash)
 
-        if resolution.capacity_delta > self.free_gpu_blocks:
-            self._apc_evict_blocks(resolution.capacity_delta - self.free_gpu_blocks)
+        shortfall = resolution.capacity_delta - self.free_gpu_blocks
+        if shortfall > 0:
+            if self._apc_policy.evictable_count() >= shortfall:
+                self._apc_evict_blocks(shortfall)
         if resolution.capacity_delta > self.free_gpu_blocks:
             # Not enough room even after evicting -- undo the attach pins and bail.
             for block_hash in resolution.attach_hashes:
@@ -637,16 +641,22 @@ class LLMWorkerVLLMScheduler:
             Number of prefix tokens matched (0 on complete miss).
         """
         assert not claim or request is not None, "claim=True requires `request`"
+        if request is not None:
+            chain = request._apc_prompt_chain
+            if chain is None:
+                chain = list(self._apc_token_db.process_tokens(hash_ids))
+                request._apc_prompt_chain = chain
+        else:
+            chain = self._apc_token_db.process_tokens(hash_ids)
         matched_tokens = 0
         chain_hash = None
-        for _start, end, block_hash in self._apc_token_db.process_tokens(hash_ids):
+        for _start, end, block_hash in chain:
             if block_hash not in self._apc_policy:
                 break
             if claim:
                 self._apc_policy.incref(block_hash)
                 request.apc_owned_hashes.add(block_hash)
-            else:
-                self._apc_policy.touch(block_hash)
+
             matched_tokens = end
             chain_hash = block_hash
         if claim:
@@ -1499,10 +1509,10 @@ class LLMWorkerVLLMScheduler:
                 # costs sim-time I/O, so it is probed once and cached.
                 apc_prefix = 0
                 if self.scheduler_config.enable_gpu_apc:
-                    apc_prefix = self._apc_lookup(req.hash_ids, claim=False)
+                    apc_prefix = self._apc_lookup(req.hash_ids, claim=False, request=req)
 
                 if not hasattr(req, "_kvc_lookup_done"):
-                    tiered_prefix, req._kvc_tier_hit_tokens = yield safe_process(
+                    tiered_prefix = yield safe_process(
                         self.simpy_env, self._kvc_manager.lookup(tokens=req.hash_ids)
                     )
                     req._kvc_lookup_done = True
@@ -1519,7 +1529,7 @@ class LLMWorkerVLLMScheduler:
                     req.apc_resolved_tokens = apc_hit
                     req.prompt_processed = apc_hit
                     req.llm_request.stats.set_prefix_hit_tokens(apc_hit)
-                    req.llm_request.stats.set_kvc_tier_tokens({"apc", apc_hit})
+                    req.llm_request.stats.set_kvc_tier_tokens({"apc": apc_hit})
                     num_prefix_tokens = 0
                     self.log.debug(
                         f"[HIT] [APC] req {req.request_id}: apc={apc_prefix} >= tiered={tiered_prefix}; "
@@ -1529,8 +1539,9 @@ class LLMWorkerVLLMScheduler:
                 elif tiered_prefix > 0:
                     # Tiered wins -- async fetch from CPU/DFS (FETCH_KVC block below).
                     num_prefix_tokens = tiered_prefix
-                    # Attribute the matched prefix to its serving tiers (CPU/NVMe/DFS).
-                    # Each token is counted under exactly one tier (see lookup()).
+                    # Tier attribution is recorded by _async_kvc_retrieve() from
+                    # retrieve()'s own accounting -- that reflects what was actually
+                    # fetched (max_fetch can clamp it), not merely what matched.
                     req.llm_request.stats.set_kvc_tier_tokens(dict(req._kvc_tier_hit_tokens))
                 else:
                     # Miss in both tiers -> full prefill.
