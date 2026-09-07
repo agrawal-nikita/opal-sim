@@ -528,6 +528,15 @@ class LLMWorkerVLLMScheduler:
         if redundant:
             self.free_gpu_blocks += redundant
             request.allocated_blocks -= redundant
+            assert 0 <= self.free_gpu_blocks <= self.total_gpu_blocks, (
+                f"promote_resident credited {redundant} redundant block(s) for request "
+                f"{request.request_id} and broke the free-block invariant: "
+                f"free={self.free_gpu_blocks}/{self.total_gpu_blocks}"
+            )
+            assert request.allocated_blocks >= 0, (
+                f"promote_resident drove allocated_blocks negative for request "
+                f"{request.request_id}: {request.allocated_blocks}"
+            )
         commit_apc_blocks(self._apc_policy, resolution, self._apc_block_source, ref)
         for block_hash, _end in resolution.new_block_hashes:
             request.apc_owned_hashes.add(block_hash)
@@ -1562,6 +1571,16 @@ class LLMWorkerVLLMScheduler:
                         continue
 
                     # Check if we have enough blocks
+                    if kvc_blocks > self.free_gpu_blocks and self.scheduler_config.enable_gpu_apc:
+                        shortfall = kvc_blocks - self.free_gpu_blocks
+                        if self._apc_policy.evictable_count() >= shortfall:
+                            reclaimed = self._apc_evict_blocks(shortfall)
+                            self.log.debug(
+                                f"Request {req.request_id}: reclaimed {reclaimed} idle APC block(s) "
+                                f"to cover KVC fetch shortfall of {shortfall} "
+                                f"(free_blocks={self.free_gpu_blocks}/{self.total_gpu_blocks})"
+                            )
+
                     if kvc_blocks > self.free_gpu_blocks:
                         self.log.debug(
                             f"Request {req.request_id}: insufficient GPU blocks for KVC fetching "
