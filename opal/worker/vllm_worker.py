@@ -75,7 +75,7 @@ import itertools
 import simpy
 
 from opal.core.events import KVCEvent, SystemEvent
-from opal.kvcache.kvc_manager import OpalKVCacheEngine, OpalTokenDatabase, OpalTokenDatabase
+from opal.kvcache.kvc_manager import OpalKVCacheEngine, OpalTokenDatabase
 from opal.kvcache.eviction_policy import resolve_apc_blocks, commit_apc_blocks, make_apc_policy
 from opal.llm_inference.opal_model import OpalModel
 from opal.core.request import LLMRequest
@@ -438,9 +438,7 @@ class LLMWorkerVLLMScheduler:
         the KVC tier's chunk_size); the metadata is reused from the KVC token
         database since APC only ever uses raw hashes (make_key=False)."""
         # Counters are always defined so logging/reporting is unconditional.
-        self._apc_evicted_blocks_since_last_sample = 0
-        self._apc_hit_tokens_total = 0
-        self._apc_lookup_tokens_total = 0
+        
         self._apc_tracer = None  # optional external event sink; call sites also log directly
 
         if not self.scheduler_config.enable_gpu_apc:
@@ -710,7 +708,6 @@ class LLMWorkerVLLMScheduler:
                         pending_stores[ref_id] = (hash_ids_ref, end_idx)
             freed += per_victim
         self.free_gpu_blocks += freed
-        self._apc_evicted_blocks_since_last_sample += freed
         # Fire one store per unique request (longest evicted prefix only)
         for hash_ids_ref, end_idx in pending_stores.values():
             def _store(h_ids):
@@ -1525,8 +1522,8 @@ class LLMWorkerVLLMScheduler:
                     )
                     req._kvc_lookup_done = True
                     req._kvc_prefix_tokens = tiered_prefix
-                    if self.scheduler_config.enable_gpu_apc:
-                        self._apc_lookup_tokens_total += req.prompt_tokens
+                    # if self.scheduler_config.enable_gpu_apc:
+                    #     self._apc_lookup_tokens_total += req.prompt_tokens
                 else:
                     tiered_prefix = req._kvc_prefix_tokens
 
@@ -1540,8 +1537,7 @@ class LLMWorkerVLLMScheduler:
                     req.prompt_processed = apc_hit
                     req.llm_request.stats.kvc_hit_type = "apc"
                     req.llm_request.stats.set_prefix_hit_tokens(apc_hit)
-                    req.llm_request.stats.set_kvc_hit_tokens_per_tier("apc", apc_hit)
-                    self._apc_hit_tokens_total += apc_hit
+                    req.llm_request.stats.set_kvc_tier_tokens("apc", apc_hit)
                     num_prefix_tokens = 0
                     self.log.debug(
                         f"[HIT] [APC] req {req.request_id}: apc={apc_prefix} >= tiered={tiered_prefix}; "
@@ -1555,7 +1551,7 @@ class LLMWorkerVLLMScheduler:
                     # Attribute the matched prefix to its serving tiers (CPU/NVMe/DFS).
                     # Each token is counted under exactly one tier (see lookup()).
                     for tier_name, tier_tokens in req._kvc_tier_hit_tokens.items():
-                        req.llm_request.stats.set_kvc_hit_tokens_per_tier(tier_name, tier_tokens)
+                        req.llm_request.stats.set_kvc_tier_tokens(tier_name, tier_tokens)
                 else:
                     # Miss in both tiers -> full prefill.
                     req.llm_request.stats.kvc_hit_type = "none"

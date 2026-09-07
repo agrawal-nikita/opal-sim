@@ -925,18 +925,6 @@ class OpalKVCacheEngine:
             concurrency=cpu_cfg["concurrency"],
         )
 
-        # CPU->GPU link for copying retrieved KV into GPU HBM. Used by retrieve()
-        # to charge the host-to-device DMA. Reuses the CPUMemory tier's config
-        # (no separate fields for the link).
-        cpu_cfg = self.opal_config["kvc"]["CPUMemory"]
-        self.cpu_gpu_link = AbstractDevice(
-            self.opal_env,
-            name=f"CPU->GPU.{self.worker_id}",
-            bandwidth_bytes_per_sec=int(cpu_cfg["bandwidth_GBps"] * 10**9),
-            latency_per_request_sec=cpu_cfg["latency_nsec"] / 10**9,
-            concurrency=cpu_cfg["concurrency"],
-        )
-
     def __str__(self):
         return f"{__class__.__name__}.{self.worker_id}"
 
