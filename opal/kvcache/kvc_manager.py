@@ -1044,6 +1044,7 @@ class OpalKVCacheEngine:
                 reordered_chunks.append((key, memory_obj, start, end))
                 tot_kv_size += memory_obj.get_size()
                 ret_mask[start:end] = True
+            tier_tokens[location] = tier_tokens.get(location, 0) + sum(end - start for _, start, end in blocks)
 
         # back to the retrieve() function and, here in the code memory_objects
         # representing data in memory are transfer to the GPU. But we dont model

@@ -68,7 +68,14 @@ class BaseAPCPolicy(abc.ABC):
         """
         old = self._ref_counts.get(block_hash, 0)
         n = max(0, old - 1)
-        self._ref_counts[block_hash] = n
+        if n:
+            self._ref_counts[block_hash] = n
+        else:
+            # Drop the entry rather than storing a 0: a decref for a hash that is
+            # no longer resident (late release after eviction, or a double-release
+            # bug elsewhere) would otherwise leave an entry nothing ever reclaims,
+            # since _forget_refcount only runs on eviction.
+            self._ref_counts.pop(block_hash, None)
         if old == 1:
             self._pinned_count -= 1
             self._on_unpin(block_hash)

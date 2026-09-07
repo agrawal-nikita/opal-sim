@@ -437,9 +437,6 @@ class LLMWorkerVLLMScheduler:
         enable_gpu_apc is set. APC hashes at block_size granularity (finer than
         the KVC tier's chunk_size); the metadata is reused from the KVC token
         database since APC only ever uses raw hashes (make_key=False)."""
-        # Counters are always defined so logging/reporting is unconditional.
-        
-        self._apc_tracer = None  # optional external event sink; call sites also log directly
 
         if not self.scheduler_config.enable_gpu_apc:
             return
@@ -453,11 +450,6 @@ class LLMWorkerVLLMScheduler:
         )
         self._apc_block_source: dict = {}  # block_hash -> (hash_ids_ref, end_idx) for evict write-through
         kvc_chunk = self._kvc_manager.token_database.chunk_size
-        # The APC policy is block-granular (its token DB chunks at block_size), so
-        # one eviction victim == one 16-token block == exactly one physical GPU
-        # block. Freeing must therefore credit 1 block per victim; crediting
-        # kvc_chunk/block_size (=16) over-credits free_gpu_blocks 16x and lets the
-        # counter drift/overcommit (util > 100%).
         self._apc_blocks_per_victim = 1
         self.log.info(
             f"GPU APC enabled: policy={type(self._apc_policy).__name__}, block_size={self.block_size}, "
@@ -578,11 +570,7 @@ class LLMWorkerVLLMScheduler:
             return 0
 
         if not self.scheduler_config.enable_gpu_apc:
-            current_tokens = request.prompt_processed + request.decode_tokens_generated
-            new_tokens = current_tokens + tokens_to_add
-            current_blocks = (current_tokens + self.block_size - 1) // self.block_size
-            new_blocks = (new_tokens + self.block_size - 1) // self.block_size
-            blocks_needed = new_blocks - current_blocks
+            blocks_needed = self._calculate_blocks_needed(request, tokens_to_add)
             if blocks_needed > self.free_gpu_blocks:
                 return None
             self.free_gpu_blocks -= blocks_needed
@@ -629,7 +617,7 @@ class LLMWorkerVLLMScheduler:
         request.apc_private_blocks += resolution.private_delta
         request.apc_chain_hash = resolution.chain_hash
         return resolution.capacity_delta
-    
+
     def _apc_lookup(
         self, hash_ids: list, claim: bool = False, request: Optional["VLLMSchedulerRequest"] = None
     ) -> int:
@@ -655,8 +643,6 @@ class LLMWorkerVLLMScheduler:
             if block_hash not in self._apc_policy:
                 break
             if claim:
-                if self._apc_tracer is not None:
-                    self._apc_tracer.emit("HIT", block_hash)
                 self._apc_policy.incref(block_hash)
                 request.apc_owned_hashes.add(block_hash)
             else:
@@ -672,7 +658,7 @@ class LLMWorkerVLLMScheduler:
             # matched content).
             request.apc_chain_hash = chain_hash
         return matched_tokens
-    
+
     def _apc_evict_blocks(self, blocks_needed: int) -> int:
         """Evict idle (ref_count == 0) blocks from the APC pool until
         blocks_needed are freed or no more idle blocks remain.
@@ -690,10 +676,12 @@ class LLMWorkerVLLMScheduler:
         # batched_put with a subset of the next one's keys.  Keep only the largest
         # end_idx per unique array so a single store covers all evicted prefixes.
         pending_stores: dict[int, tuple] = {}  # id(hash_ids_ref) -> (hash_ids_ref, max_end_idx)
-        # The policy is block-granular: one victim == one physical block. Ask for
-        # exactly blocks_needed victims in a single bulk call so the scan over the
-        # eviction ordering is amortized instead of repeated per victim.
-        per_victim = self._apc_blocks_per_victim
+        # The APC policy is block-granular (its token DB chunks at block_size), so one
+        # eviction victim == one block_size-token block == exactly one physical GPU block.
+        # Freeing therefore credits 1 block per victim; crediting kvc_chunk/block_size
+        # would over-credit free_gpu_blocks and let the counter drift (util > 100%).
+        # Ask for exactly blocks_needed victims in a single bulk call so the scan over
+        # the eviction ordering is amortized instead of repeated per victim.
         for _hash, _end in self._apc_policy.evict(blocks_needed):
             # Only write through to the CPU tier once the evicted prefix lands exactly on a
             # KVC chunk boundary. The KVC manager re-hashes whatever we pass it at its own
@@ -706,7 +694,7 @@ class LLMWorkerVLLMScheduler:
                     ref_id = id(hash_ids_ref)
                     if ref_id not in pending_stores or end_idx > pending_stores[ref_id][1]:
                         pending_stores[ref_id] = (hash_ids_ref, end_idx)
-            freed += per_victim
+            freed += 1
         self.free_gpu_blocks += freed
         # Fire one store per unique request (longest evicted prefix only)
         for hash_ids_ref, end_idx in pending_stores.values():
@@ -714,7 +702,7 @@ class LLMWorkerVLLMScheduler:
                 yield from self._kvc_manager.store(h_ids)
             self.simpy_env.process(_store(hash_ids_ref[:end_idx]))
         return freed
-    
+
     def _hbm_eviction_monitor(self):
         """Background process: proactively drain GPU APC blocks to CPU DRAM
         when HBM utilization exceeds hbm_eviction_threshold.
@@ -838,16 +826,13 @@ class LLMWorkerVLLMScheduler:
         # Preempt the candidate
         blocks_to_free = candidate.allocated_blocks
 
-        if blocks_to_free == 0 and not self.scheduler_config.enable_gpu_apc:
+        if blocks_to_free == 0:
             self.log.warning(f"Request {candidate.request_id} selected for preemption but has 0 allocated blocks")
             return False
 
-        # Free GPU blocks (APC: decref owned + return private tail; see _apc_release).
-        if self.scheduler_config.enable_gpu_apc:
-            blocks_to_free = self._apc_release(candidate)
-        else:
-            self.free_gpu_blocks += blocks_to_free
-            candidate.allocated_blocks = 0
+        # Free GPU blocks
+        self.free_gpu_blocks += blocks_to_free
+        candidate.allocated_blocks = 0
 
         # Store progress before reset for logging
         old_phase = candidate.phase
@@ -1522,8 +1507,6 @@ class LLMWorkerVLLMScheduler:
                     )
                     req._kvc_lookup_done = True
                     req._kvc_prefix_tokens = tiered_prefix
-                    # if self.scheduler_config.enable_gpu_apc:
-                    #     self._apc_lookup_tokens_total += req.prompt_tokens
                 else:
                     tiered_prefix = req._kvc_prefix_tokens
 
@@ -1535,9 +1518,8 @@ class LLMWorkerVLLMScheduler:
                     apc_hit = self._apc_lookup(req.hash_ids, claim=True, request=req)
                     req.apc_resolved_tokens = apc_hit
                     req.prompt_processed = apc_hit
-                    req.llm_request.stats.kvc_hit_type = "apc"
                     req.llm_request.stats.set_prefix_hit_tokens(apc_hit)
-                    req.llm_request.stats.set_kvc_tier_tokens("apc", apc_hit)
+                    req.llm_request.stats.set_kvc_tier_tokens({"apc", apc_hit})
                     num_prefix_tokens = 0
                     self.log.debug(
                         f"[HIT] [APC] req {req.request_id}: apc={apc_prefix} >= tiered={tiered_prefix}; "
@@ -1546,15 +1528,12 @@ class LLMWorkerVLLMScheduler:
                     )
                 elif tiered_prefix > 0:
                     # Tiered wins -- async fetch from CPU/DFS (FETCH_KVC block below).
-                    req.llm_request.stats.kvc_hit_type = "tiered"
                     num_prefix_tokens = tiered_prefix
                     # Attribute the matched prefix to its serving tiers (CPU/NVMe/DFS).
                     # Each token is counted under exactly one tier (see lookup()).
-                    for tier_name, tier_tokens in req._kvc_tier_hit_tokens.items():
-                        req.llm_request.stats.set_kvc_tier_tokens(tier_name, tier_tokens)
+                    req.llm_request.stats.set_kvc_tier_tokens(dict(req._kvc_tier_hit_tokens))
                 else:
                     # Miss in both tiers -> full prefill.
-                    req.llm_request.stats.kvc_hit_type = "none"
                     num_prefix_tokens = 0
 
                 # self.log.debug(
