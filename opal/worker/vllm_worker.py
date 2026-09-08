@@ -392,12 +392,31 @@ class LLMWorkerVLLMScheduler:
         # So effective memory for KV cache is tp_degree * single_gpu_memory
         total_gpu_memory_bytes = int(gpu_memory_gb * tp_degree * 1024**3)
 
+        # Standard vLLM semantics: only this fraction of HBM is used by the engine
+        # at all; the remainder is headroom for activations, fragmentation, etc.
+        # Model weights come out of the utilized portion, and whatever is left
+        # becomes KV cache. Default 1.0 keeps configs that omit it unchanged.
+        gpu_memory_utilization = self.opalConfig["worker"]["vllm_params"].get("gpu_memory_utilization", 1.0)
+        if not 0.0 < gpu_memory_utilization <= 1.0:
+            raise ValueError(
+                f"worker.vllm_params.gpu_memory_utilization must be in (0.0, 1.0], "
+                f"got {gpu_memory_utilization}"
+            )
+        usable_memory_bytes = int(total_gpu_memory_bytes * gpu_memory_utilization)
+
         model_params = self.model_config.get_model_params()
         # quantization-aware (e.g. 0.5 B/param for NVFP4), not a hardcoded
         # bf16 assumption -- see opal.llm_inference.config_loader.guess_bytes_per_elem
         model_size_bytes = model_params * self.model_config.weight_bytes_per_elem
 
-        free_memory_bytes = total_gpu_memory_bytes - model_size_bytes
+        free_memory_bytes = usable_memory_bytes - model_size_bytes
+        if free_memory_bytes <= 0:
+            raise ValueError(
+                f"No GPU memory left for KV cache: model needs "
+                f"{model_size_bytes / 1024**3:.2f} GB but only "
+                f"{usable_memory_bytes / 1024**3:.2f} GB is usable "
+                f"({gpu_memory_gb} GB x tp={tp_degree} x utilization={gpu_memory_utilization})"
+            )
         block_size_bytes = self.block_size * self.model_config.key_value_bytes
 
         self.total_gpu_blocks = int(free_memory_bytes // block_size_bytes)
@@ -426,6 +445,7 @@ class LLMWorkerVLLMScheduler:
             f"tp_degree={tp_degree}, "
             f"per_gpu_memory={gpu_memory_gb}GB, "
             f"total_memory={gpu_memory_gb * tp_degree}GB, "
+            f"gpu_memory_utilization={gpu_memory_utilization}, "
             f"model_size={model_size_bytes / 1024**3:.2f}GB, "
             f"free_memory={free_memory_bytes / 1024**3:.2f}GB, "
             f"block_size={self.block_size} tokens, "
@@ -464,7 +484,10 @@ class LLMWorkerVLLMScheduler:
         max_model_len = self.model_config.max_position_embeddings
 
         gpu_memory_gb = self.opalConfig["worker"]["hw"].get("memory_gb")
-        gpu_memory_kvcache_bytes = int(gpu_memory_gb * 1024**3)
+        # Same vLLM semantics as _init_gpu_memory_blocks: only this fraction of HBM
+        # is usable by the engine. Kept consistent with that calculation.
+        gpu_memory_utilization = vllm_params.get("gpu_memory_utilization", 1.0)
+        gpu_memory_kvcache_bytes = int(gpu_memory_gb * gpu_memory_utilization * 1024**3)
         max_kvc_ready_requests = vllm_params["max_kvc_ready_requests"]
         lookahead_reqs = vllm_params.get("lookahead_reqs", 256)  # Default to 256 if not specified
         enable_gpu_apc = vllm_params.get("enable_gpu_apc", False)
@@ -481,28 +504,36 @@ class LLMWorkerVLLMScheduler:
         )
         return config
 
+    # Synthetic output-id layout: ids sit above the real vocab so they can never
+    # collide with a tokenizer id, and each request gets its own 2^20-wide range.
+    _APC_SYNTHETIC_ID_BASE = 1 << 40       # above any real token id
+    _APC_SYNTHETIC_ID_STRIDE = 1 << 20     # per-request range; assumes output_tokens < 2^20
+
     def _apc_hash_ids_for(self, request: "VLLMSchedulerRequest", up_to_tokens: int = 0) -> list:
         """Stable full-sequence (prompt + output) token-id list backing this
         request's APC block hashing."""
         ref = request._apc_hash_ids_ref
         if ref is None:
             prompt = list(request.hash_ids)
-            out = getattr(request.llm_request, "output_token_ids", None)
-            if out:
-                ref = prompt + list(out)
+            real_output_ids = getattr(request.llm_request, "output_token_ids", None)
+            if real_output_ids:
+                # otel replay: use the ids the trace actually generated.
+                ref = prompt + list(real_output_ids)
             else:
-                # No real generated token ids (e.g. synthetic workloads): fabricate
-                # decode-position ids that are unique per request and far outside
-                # the real vocab, so decode blocks never falsely dedupe across
-                # requests while the real prompt prefix still shares. Layout:
-                #   id = 2^40 (above any real token id) + request_id*2^20 (per-request
-                #   range) + position. Assumes output_tokens < 2^20.
-                ref = prompt + [
-                    (1 << 40) + request.request_id * (1 << 20) + i
-                    for i in range(request.output_tokens)
-                ]
+                # Synthetic workload: no generated text exists to replay.
+                ref = prompt + self._apc_synthetic_output_ids(request)
             request._apc_hash_ids_ref = ref
         return ref
+
+    def _apc_synthetic_output_ids(self, request: "VLLMSchedulerRequest") -> list:
+        """Placeholder output-token ids for workloads that generate no real text."""
+        base = self._APC_SYNTHETIC_ID_BASE + request.request_id * self._APC_SYNTHETIC_ID_STRIDE
+        assert request.output_tokens < self._APC_SYNTHETIC_ID_STRIDE, (
+            f"request {request.request_id} has {request.output_tokens} output tokens, which "
+            f"overflows the {self._APC_SYNTHETIC_ID_STRIDE}-wide synthetic id range and would "
+            f"collide with the next request's ids"
+        )
+        return [base + i for i in range(request.output_tokens)]
 
     def _apc_promote_resident(self, request: "VLLMSchedulerRequest", up_to_tokens: int) -> None:
         """Register already-resident prompt blocks (e.g. just fetched from the
