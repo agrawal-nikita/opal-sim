@@ -156,6 +156,7 @@ class OpalConfig:
             if not (
                 workload == "trace".casefold()
                 or workload == "otel".casefold()
+                or workload == "wekatrace".casefold()
                 or workload == "SC25Workload".casefold()
             ):
                 str = (
