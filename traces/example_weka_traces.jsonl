@@ -1,0 +1,2 @@
+{"trace_id": "trace-A", "requests": [{"t": 0.0, "think_time": 0.0, "input_length": 130, "hash_ids": [1, 2, 3], "output_length": 20}, {"t": 3.0, "think_time": 1.5, "input_length": 64, "hash_ids": [4], "output_length": 10}]}
+{"trace_id": "trace-B", "requests": [{"t": 0.0, "think_time": 0.0, "input_length": 128, "hash_ids": [1, 2], "output_length": 15}]}

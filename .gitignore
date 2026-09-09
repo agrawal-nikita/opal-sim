@@ -18,3 +18,7 @@ uv.lock
 .vscode/
 *.swp
 *~
+
+# large raw dataset downloads (e.g. tools/agentic/weka_to_trace.py inputs) -- never commit these
+traces/weka-raw/
+*.parquet
